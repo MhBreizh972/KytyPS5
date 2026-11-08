@@ -307,6 +307,12 @@ void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, 
 	operation();
 }
 
+void CommandScheduler::SetProgressHook(ProgressHook hook, void* user) {
+	std::lock_guard lock(m_progress_mutex);
+	m_progress_hook = hook;
+	m_progress_user = user;
+}
+
 bool CommandScheduler::HasPendingPriorityOperations() {
 	std::lock_guard lock(m_operation_mutex);
 	return !m_priority_operations.empty() || m_priority_active_tick != 0;
@@ -336,6 +342,12 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			m_priority_active_tick = 0;
 		}
 		m_operation_available.notify_all();
+		{
+			std::lock_guard lock(m_progress_mutex);
+			if (m_progress_hook != nullptr) {
+				m_progress_hook(m_progress_user);
+			}
+		}
 	}
 }
 

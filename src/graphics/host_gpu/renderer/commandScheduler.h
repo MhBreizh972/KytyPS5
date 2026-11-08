@@ -41,6 +41,10 @@ public:
 	void                      DeferOperation(Common::UniqueFunction<void>&& operation);
 	void                      DeferPriorityOperation(Common::UniqueFunction<void>&& operation);
 	[[nodiscard]] bool        HasPendingPriorityOperations();
+	// Called on the priority runner after each operation, which may have published a result a
+	// suspended guest queue waits for. Clearing it waits for a running call to return.
+	using ProgressHook = void (*)(void* user);
+	void SetProgressHook(ProgressHook hook, void* user);
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
 
 	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
@@ -112,6 +116,9 @@ private:
 	std::jthread                 m_priority_thread;
 	uint64_t                     m_priority_active_tick = 0; // 0 while none runs
 	OperationState               m_operation_state      = OperationState::Open;
+	std::mutex                   m_progress_mutex;
+	ProgressHook                 m_progress_hook = nullptr;
+	void*                        m_progress_user = nullptr;
 	vk::QueryPool                m_timer_pool           = nullptr;
 	double                       m_timer_period_ns      = 0.0;
 	uint64_t                     m_timer_mask           = 0;
