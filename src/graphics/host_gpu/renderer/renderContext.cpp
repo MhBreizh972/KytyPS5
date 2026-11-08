@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 
+#include "common/debugCounters.h"
 #include "common/assert.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/presentation/videoOut.h"
@@ -80,11 +81,15 @@ bool RenderContext::WaitWriteBacks(uint64_t vaddr, uint64_t size) {
 	if (tick == 0) {
 		return false;
 	}
+	KYTY_WAIT_REASON(WaitWriteBackNs);
 	// The GPU thread can fault inside a draw, so it submits without running deferred operations.
 	if (GuestGpu::IsGpuThread()) {
 		m_command_scheduler.Wait(tick);
 	} else if (tick == m_command_scheduler.CurrentTick()) {
-		GetGpu().SendCommandSync([this, tick] { m_command_scheduler.Wait(tick); });
+		GetGpu().SendCommandSync([this, tick] {
+			KYTY_WAIT_REASON(WaitWriteBackNs);
+			m_command_scheduler.Wait(tick);
+		});
 	}
 	m_command_scheduler.WaitPriorityOperations(tick);
 	return true;

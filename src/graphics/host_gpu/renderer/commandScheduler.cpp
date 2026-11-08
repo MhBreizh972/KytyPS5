@@ -77,10 +77,97 @@ bool CommandScheduler::InDeferredOperation() noexcept {
 CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graphics)
     : m_master(graphics), m_context(context), m_graphics(graphics),
       m_command_pool(graphics, m_master), m_command(*this),
-      m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {}
+      m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {
+	InitializeGpuTimer();
+}
 
 CommandScheduler::~CommandScheduler() {
 	Shutdown();
+	if (m_timer_pool) {
+		m_graphics.device.destroyQueryPool(m_timer_pool, nullptr);
+	}
+}
+
+void CommandScheduler::InitializeGpuTimer() {
+	const auto& limits = m_graphics.physical_device_properties.limits;
+	if (!limits.timestampComputeAndGraphics || limits.timestampPeriod <= 0.0f) {
+		return;
+	}
+	uint32_t family_count = 0;
+	m_graphics.physical_device.getQueueFamilyProperties(&family_count, nullptr);
+	std::vector<vk::QueueFamilyProperties> families(family_count);
+	m_graphics.physical_device.getQueueFamilyProperties(&family_count, families.data());
+	if (m_graphics.queue_family >= family_count) {
+		return;
+	}
+	const auto bits = families[m_graphics.queue_family].timestampValidBits;
+	if (bits == 0) {
+		return;
+	}
+	const vk::QueryPoolCreateInfo info {.queryType  = vk::QueryType::eTimestamp,
+	                                    .queryCount = TimerSlots * 2};
+	if (m_graphics.device.createQueryPool(&info, nullptr, &m_timer_pool) != vk::Result::eSuccess) {
+		m_timer_pool = nullptr;
+		return;
+	}
+	m_timer_period_ns = limits.timestampPeriod;
+	m_timer_mask      = bits >= 64 ? ~uint64_t {0} : (uint64_t {1} << bits) - 1;
+	m_timer_busy.assign(TimerSlots, 0);
+}
+
+void CommandScheduler::BeginGpuTimer(vk::CommandBuffer buffer) {
+	m_timer_slot = -1;
+	if (!m_timer_pool) {
+		return;
+	}
+	CollectGpuTimers();
+	if (!Common::DebugCounters::Enabled() || m_timer_busy[m_timer_next] != 0) {
+		return;
+	}
+	const auto slot = m_timer_next;
+	m_timer_next    = (slot + 1) % TimerSlots;
+	buffer.resetQueryPool(m_timer_pool, slot * 2, 2);
+	buffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, m_timer_pool, slot * 2);
+	m_timer_slot = static_cast<int32_t>(slot);
+}
+
+void CommandScheduler::EndGpuTimer(vk::CommandBuffer buffer, uint64_t tick) {
+	if (m_timer_slot < 0) {
+		return;
+	}
+	const auto slot = static_cast<uint32_t>(m_timer_slot);
+	buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, m_timer_pool, slot * 2 + 1);
+	m_timer_busy[slot] = 1;
+	m_timer_pending.push_back({slot, tick});
+	m_timer_slot = -1;
+}
+
+void CommandScheduler::CollectGpuTimers() {
+	// Submission order is GPU execution order on this queue, so the union of the intervals is the
+	// time the queue had work, without counting overlap between adjacent buffers twice.
+	while (!m_timer_pending.empty() && m_master.IsFree(m_timer_pending.front().tick)) {
+		const auto slot = m_timer_pending.front().slot;
+		m_timer_pending.pop_front();
+		m_timer_busy[slot] = 0;
+		uint64_t   stamps[2] {};
+		const auto result = m_graphics.device.getQueryPoolResults(
+		    m_timer_pool, slot * 2, 2, sizeof(stamps), stamps, sizeof(uint64_t),
+		    vk::QueryResultFlagBits::e64);
+		if (result != vk::Result::eSuccess) {
+			continue;
+		}
+		const auto begin = stamps[0] & m_timer_mask;
+		const auto end   = stamps[1] & m_timer_mask;
+		if (end < begin) {
+			continue;
+		}
+		const auto start = std::max(begin, std::min(m_timer_last_end, end));
+		m_timer_last_end = std::max(m_timer_last_end, end);
+		Common::DebugCounters::Add(
+		    Common::DebugCounters::Counter::GpuExecNs,
+		    static_cast<uint64_t>(static_cast<double>(end - start) * m_timer_period_ns));
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuTimedSubmits);
+	}
 }
 
 void CommandScheduler::Shutdown() {
@@ -147,6 +234,7 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 }
 
 void CommandScheduler::Finish() {
+	KYTY_WAIT_REASON(WaitFinishNs);
 	CheckActive();
 	if (!m_command.IsInvalid()) {
 		Submit();
@@ -219,6 +307,12 @@ void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, 
 	operation();
 }
 
+void CommandScheduler::SetProgressHook(ProgressHook hook, void* user) {
+	std::lock_guard lock(m_progress_mutex);
+	m_progress_hook = hook;
+	m_progress_user = user;
+}
+
 bool CommandScheduler::HasPendingPriorityOperations() {
 	std::lock_guard lock(m_operation_mutex);
 	return !m_priority_operations.empty() || m_priority_active_tick != 0;
@@ -248,6 +342,12 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			m_priority_active_tick = 0;
 		}
 		m_operation_available.notify_all();
+		{
+			std::lock_guard lock(m_progress_mutex);
+			if (m_progress_hook != nullptr) {
+				m_progress_hook(m_progress_user);
+			}
+		}
 	}
 }
 
@@ -298,6 +398,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
+	BeginGpuTimer(m_command.m_buffer);
 	m_dynamic_state.Invalidate();
 	return m_command;
 }
@@ -305,6 +406,10 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(m_command.IsInvalid());
 
+	// The buffer normally signals the tick NextTick returns below. If another submission takes it
+	// first, the read is attempted early and an unavailable result is dropped, never waited on.
+	m_command.EndRendering();
+	EndGpuTimer(m_command.m_buffer, m_master.CurrentTick());
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;

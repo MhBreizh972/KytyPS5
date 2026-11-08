@@ -7,7 +7,9 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 #include "graphics/host_gpu/renderer/render.h"
 
+#include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -39,6 +41,10 @@ public:
 	void                      DeferOperation(Common::UniqueFunction<void>&& operation);
 	void                      DeferPriorityOperation(Common::UniqueFunction<void>&& operation);
 	[[nodiscard]] bool        HasPendingPriorityOperations();
+	// Called on the priority runner after each operation, which may have published a result a
+	// suspended guest queue waits for. Clearing it waits for a running call to return.
+	using ProgressHook = void (*)(void* user);
+	void SetProgressHook(ProgressHook hook, void* user);
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
 
 	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
@@ -80,6 +86,18 @@ private:
 		uint64_t                     tick = 0;
 	};
 
+	// Performance lab GPU timing: top/bottom timestamps per command buffer, read without waiting
+	// once the GPU timeline passes the buffer's tick. Active only while debug counters are on.
+	static constexpr uint32_t TimerSlots = 512;
+	struct PendingTimer {
+		uint32_t slot;
+		uint64_t tick;
+	};
+	void InitializeGpuTimer();
+	void BeginGpuTimer(vk::CommandBuffer buffer);
+	void EndGpuTimer(vk::CommandBuffer buffer, uint64_t tick);
+	void CollectGpuTimers();
+
 	void BeginNext();
 	void PriorityOperationsThread(std::stop_token stop);
 	void QueueOperation(Common::UniqueFunction<void>&& operation, bool priority);
@@ -98,6 +116,17 @@ private:
 	std::jthread                 m_priority_thread;
 	uint64_t                     m_priority_active_tick = 0; // 0 while none runs
 	OperationState               m_operation_state      = OperationState::Open;
+	std::mutex                   m_progress_mutex;
+	ProgressHook                 m_progress_hook = nullptr;
+	void*                        m_progress_user = nullptr;
+	vk::QueryPool                m_timer_pool           = nullptr;
+	double                       m_timer_period_ns      = 0.0;
+	uint64_t                     m_timer_mask           = 0;
+	uint32_t                     m_timer_next           = 0;
+	int32_t                      m_timer_slot           = -1;
+	uint64_t                     m_timer_last_end       = 0;
+	std::vector<uint8_t>         m_timer_busy;
+	std::deque<PendingTimer>     m_timer_pending;
 };
 
 } // namespace Libs::Graphics

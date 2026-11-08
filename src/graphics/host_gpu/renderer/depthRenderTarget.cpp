@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 
+#include "common/debugCounters.h"
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/logging/log.h"
@@ -407,6 +408,7 @@ bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
 		region.dstSubresource = region.srcSubresource;
 		region.extent = write_desc.info.extent;
 	}
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::ImageCopies);
 	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal,
 	                  destination.backing.image, vk::ImageLayout::eTransferDstOptimal,
 	                  count, regions.data());

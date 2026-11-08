@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/occlusionQueries.h"
 
+#include "common/debugCounters.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
@@ -50,9 +51,12 @@ void OcclusionQueries::Dump(uint64_t address) {
 		m_open--;
 	}
 	m_dumps.push_back({address, m_scheduler.CurrentTick(), m_begun, m_uncounted});
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::OcclusionDumps);
 }
 
 void OcclusionQueries::PublishDumps() {
+	KYTY_WAIT_REASON(WaitOcclusionNs);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::OcclusionPublishes);
 	if (const auto last = m_dumps.back().queries; last != m_read) {
 		m_scheduler.Wait(m_dumps.back().tick);
 		// The unread queries wrap around the pool at most once.

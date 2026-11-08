@@ -23,7 +23,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -36,10 +39,83 @@ namespace Libs::Graphics {
 static thread_local Pm4Execution* g_current_execution = nullptr;
 static thread_local GuestGpu*     g_gpu_state         = nullptr;
 
+namespace {
+
+// KYTY_CP_WAKEUP=0 restores the plain retry timeout: no completion wakeups and no spin.
+bool CpWakeupEnabled() {
+	static const bool enabled = [] {
+		const char* text = std::getenv("KYTY_CP_WAKEUP");
+		return text == nullptr || std::strcmp(text, "0") != 0;
+	}();
+	return enabled;
+}
+
+// KYTY_CP_BLOCKED_SPIN_US: how long suspended queues are retried after progress before the GPU
+// thread sleeps (default 50, 0 disables, at most 1000).
+uint32_t CpBlockedSpinMicros() {
+	static const uint32_t micros = [] {
+		if (!CpWakeupEnabled()) {
+			return 0u;
+		}
+		const char* text = std::getenv("KYTY_CP_BLOCKED_SPIN_US");
+		if (text == nullptr || *text == '\0') {
+			return 50u;
+		}
+		return static_cast<uint32_t>(std::min(std::strtoul(text, nullptr, 10), 1000ul));
+	}();
+	return micros;
+}
+
+// KYTY_IDLE_FLUSH_DRAWS: draws and dispatches recorded into the open command buffer before an
+// idle host GPU gets them early (default 8, four times as many inside a rendering instance,
+// 0 disables).
+uint32_t IdleFlushDraws() {
+	static const uint32_t draws = [] {
+		const char* text = std::getenv("KYTY_IDLE_FLUSH_DRAWS");
+		if (text == nullptr || *text == '\0') {
+			return 8u;
+		}
+		return static_cast<uint32_t>(std::min(std::strtoul(text, nullptr, 10), 1ul << 20u));
+	}();
+	return draws;
+}
+
+// KYTY_SUSPEND_POINT_DEPTH: guest frames (sceAgcSuspendPoint calls) that may run ahead of the
+// host GPU's completion of the earlier ones. 1 is the previous behavior; default 2.
+std::ptrdiff_t SuspendPointDepth(std::ptrdiff_t max) {
+	const char* text = std::getenv("KYTY_SUSPEND_POINT_DEPTH");
+	if (text == nullptr || *text == '\0') {
+		return 2;
+	}
+	return std::clamp<std::ptrdiff_t>(std::strtol(text, nullptr, 10), 1, max);
+}
+
+} // namespace
+
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	m_suspend_point_ready =
+	    std::make_shared<SuspendPointSemaphore>(SuspendPointDepth(SuspendPointDepthMax));
 	m_gfx_cp = std::make_unique<CommandProcessor>(renderer, 0);
 	m_thread = std::jthread(ThreadRun, this);
+	if (CpWakeupEnabled()) {
+		m_renderer.GetCommandScheduler().SetProgressHook(NotifyProgress, this);
+	}
+}
+
+void GuestGpu::NotifyProgress(void* data) {
+	auto* gpu = static_cast<GuestGpu*>(data);
+	// Racing the GPU thread's decision to sleep only falls back to its retry timeout.
+	if (!gpu->m_all_blocked.load(std::memory_order_acquire)) {
+		return;
+	}
+	Common::LockGuard lock(gpu->m_queue_mutex);
+	for (auto& queue: gpu->m_queues) {
+		if (!queue.empty()) {
+			queue.front().blocked = false;
+		}
+	}
+	gpu->m_work_available.Signal();
 }
 
 GuestGpu::~GuestGpu() {
@@ -51,6 +127,8 @@ void GuestGpu::Shutdown() {
 	if (m_shutdown_complete) {
 		return;
 	}
+	// Returns once no progress call is running, so none can reach this object afterwards.
+	m_renderer.GetCommandScheduler().SetProgressHook(nullptr, nullptr);
 	{
 		Common::LockGuard lock(m_queue_mutex);
 		m_accepting = false;
@@ -144,7 +222,8 @@ void GuestGpu::SubmitFlipPreparation(uint64_t request_id) {
 void GuestGpu::SuspendPoint() {
 	EXIT_IF(IsGpuThread() || CommandScheduler::InDeferredOperation());
 	// Do not hold a queue lock while waiting: asynchronous work may be needed to
-	// finish the preceding graphics frame. The first point returns immediately.
+	// finish the preceding graphics frame. The first points, up to the depth, return
+	// immediately; the guest still orders its own GPU work through labels and fences.
 	m_suspend_point_ready->acquire();
 	Submission submission;
 	submission.type = SubmissionType::SuspendPoint;
@@ -391,6 +470,13 @@ void GuestGpu::ThreadRun(void* data) {
 	KYTY_PROFILER_THREAD("Thread_Gpu");
 	g_gpu_state = gpu;
 
+	// After progress, suspended queues are retried for a short window before sleeping: a guest
+	// CPU write that satisfies a wait is not signaled, and a Windows condition variable timeout
+	// lasts at least a scheduler tick (1 ms with SDL's timer resolution), not 100 us.
+	using SpinClock          = std::chrono::steady_clock;
+	const auto spin_window   = std::chrono::microseconds(CpBlockedSpinMicros());
+	auto       spin_deadline = SpinClock::now() + spin_window;
+
 	for (;;) {
 		Submission                   submission;
 		Common::UniqueFunction<void> command;
@@ -420,9 +506,29 @@ void GuestGpu::ThreadRun(void* data) {
 						break;
 					}
 				}
+				if (selected_queue < 0 && spin_window.count() > 0 &&
+				    SpinClock::now() < spin_deadline) {
+					gpu->m_processing = false;
+					gpu->m_queue_mutex.Unlock();
+					std::this_thread::yield();
+					gpu->m_queue_mutex.Lock();
+					for (auto& queue: gpu->m_queues) {
+						if (!queue.empty()) {
+							queue.front().blocked = false;
+						}
+					}
+					continue;
+				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					gpu->m_all_blocked.store(true, std::memory_order_release);
+					{
+						Common::DebugCounters::ScopedTimer blocked(
+						    Common::DebugCounters::Counter::CpBlockedSleeps,
+						    Common::DebugCounters::Counter::CpBlockedSleepNs);
+						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					}
+					gpu->m_all_blocked.store(false, std::memory_order_release);
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;
@@ -451,6 +557,7 @@ void GuestGpu::ThreadRun(void* data) {
 				command();
 			}
 
+			spin_deadline = SpinClock::now() + spin_window;
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			gpu->m_processing = false;
 			if (gpu->m_commands.empty() && gpu->m_submission_count == 0) {
@@ -464,6 +571,9 @@ void GuestGpu::ThreadRun(void* data) {
 			    Common::DebugCounters::Counter::GpuThreadBusyNs);
 			return gpu->Process(submission);
 		}();
+		if (complete || submission.execution.MadeProgress()) {
+			spin_deadline = SpinClock::now() + spin_window;
+		}
 
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
@@ -704,12 +814,48 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 	}
 }
 
+void CommandProcessor::MaybeFlushIdleGpu() {
+	const auto threshold = IdleFlushDraws();
+	if (threshold == 0) {
+		return;
+	}
+	auto&      scheduler = GetScheduler();
+	const auto tick      = scheduler.CurrentTick();
+	// Any other submission starts a new command buffer and the count over.
+	if (tick != m_idle_flush_tick) {
+		m_idle_flush_tick   = tick;
+		m_idle_flush_work   = 0;
+		m_idle_flush_checks = 0;
+	}
+	const auto needed = scheduler.Current().IsRendering() ? threshold * 4 : threshold;
+	if (++m_idle_flush_work < needed) {
+		return;
+	}
+	// The open buffer has tick; the GPU is idle once it has signaled every earlier one. Reading
+	// the driver's counter is cheap but not free, so it is refreshed on every fourth check.
+	auto& master = scheduler.GetMasterSemaphore();
+	if (!master.IsFree(tick - 1)) {
+		if ((++m_idle_flush_checks & 3u) != 0) {
+			return;
+		}
+		master.Refresh();
+		if (!master.IsFree(tick - 1)) {
+			return;
+		}
+	}
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::IdleFlushes);
+	// A plain submission boundary, as at the end of a slice; the occlusion publication that
+	// BufferFlush adds for a polling guest is not needed in the middle of a command list.
+	scheduler.Flush();
+}
+
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
 		args.instance_count = NumInstances();
 	}
 	m_renderer.GetRenderExecutor().DrawIndex(CurrentBuffer(), args);
+	MaybeFlushIdleGpu();
 }
 
 const void* CommandProcessor::IndexAddress(uint32_t first_index) const {
@@ -790,6 +936,10 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		return;
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::IndirectDraws, draw_count);
+	struct FlushAfter {
+		CommandProcessor& cp;
+		~FlushAfter() { cp.MaybeFlushIdleGpu(); }
+	} flush_after {*this};
 
 	auto&      executor  = m_renderer.GetRenderExecutor();
 	const auto args_addr = m_draw_indirect_args_base_addr + data_offset;
@@ -844,6 +994,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	m_renderer.GetRenderExecutor().DispatchDirect(CurrentBuffer(), thread_group_x, thread_group_y,
 	                                              thread_group_z, mode, IsAsyncComputeQueue());
+	MaybeFlushIdleGpu();
 }
 
 void CommandProcessor::ProcessPssr(const Pssr::Request& request) {
@@ -861,6 +1012,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,
 	                                                IsAsyncComputeQueue());
+	MaybeFlushIdleGpu();
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
@@ -868,6 +1020,7 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 		args.instance_count = NumInstances();
 	}
 	m_renderer.GetRenderExecutor().DrawAuto(CurrentBuffer(), args);
+	MaybeFlushIdleGpu();
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
@@ -1020,6 +1173,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 				            "may be lower.\n");
 			});
 
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::OcclusionSyntheticDumps);
 			// Without host occlusion queries, publish an always-visible result. The PS5 layout
 			// contains one interleaved begin/end pair per DB, and bit 63 marks a result ready.
 			constexpr uint64_t ready_bit    = 1ull << 63u;

@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
+#include "common/debugCounters.h"
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/profiler.h"
@@ -164,15 +165,18 @@ void Buffer::CopyFrom(CommandBuffer& command, const Buffer& source, uint64_t sou
 	    Barrier(destination_offset, size, MEMORY_ACCESS, vk::AccessFlagBits::eTransferWrite),
 	};
 	const auto native = command.Handle();
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
 	                       0, nullptr, 2, before, 0, nullptr);
 	const vk::BufferCopy copy {source_offset, destination_offset, size};
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferCopies);
 	native.copyBuffer(source.Handle(), Handle(), 1, &copy);
 	const vk::BufferMemoryBarrier after[] = {
 	    source.Barrier(source_offset, size, vk::AccessFlagBits::eTransferRead, MEMORY_ACCESS),
 	    Barrier(destination_offset, size, vk::AccessFlagBits::eTransferWrite, MEMORY_ACCESS),
 	};
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 	                       vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 2, after, 0, nullptr);
@@ -186,11 +190,13 @@ void Buffer::Fill(uint64_t offset, uint64_t size, uint32_t value) {
 	command.EndRendering();
 	const auto before = Barrier(offset, size, MEMORY_ACCESS, vk::AccessFlagBits::eTransferWrite);
 	const auto native = command.Handle();
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
 	                       0, nullptr, 1, &before, 0, nullptr);
 	native.fillBuffer(Handle(), offset, size, value);
 	const auto after = Barrier(offset, size, vk::AccessFlagBits::eTransferWrite, MEMORY_ACCESS);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 	                       vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
@@ -313,7 +319,10 @@ bool StreamBuffer::WaitPendingOperations(const std::vector<Watch>& watches,
 		if (!Scheduler().IsFree(watch.tick) && !allow_wait) {
 			return false;
 		}
-		Scheduler().Wait(watch.tick);
+		{
+			KYTY_WAIT_REASON(WaitStreamNs);
+			Scheduler().Wait(watch.tick);
+		}
 		if (Usage() == MemoryUsage::Download) {
 			Scheduler().WaitPriorityOperations(watch.tick);
 		}

@@ -63,6 +63,8 @@ private:
 	};
 
 	void              Enqueue(Submission submission);
+	// Retries suspended queues after a completion that may satisfy their wait.
+	static void       NotifyProgress(void* data);
 	void              ProcessCommands();
 	bool              Process(Submission& submission);
 	static void       ThreadRun(void* data);
@@ -82,9 +84,14 @@ private:
 	bool                                           m_accepting         = true;
 	bool                                           m_stopping          = false;
 	bool                                           m_shutdown_complete = false;
-	// Completion callbacks can outlive GuestGpu during renderer shutdown.
-	std::shared_ptr<std::binary_semaphore> m_suspend_point_ready =
-	    std::make_shared<std::binary_semaphore>(1);
+	// Set while the GPU thread sleeps with every queue suspended.
+	std::atomic_bool                               m_all_blocked {false};
+	// Suspend points the guest may pass before the host GPU completes the earlier ones
+	// (KYTY_SUSPEND_POINT_DEPTH). Completion callbacks can outlive GuestGpu during renderer
+	// shutdown.
+	static constexpr std::ptrdiff_t                      SuspendPointDepthMax = 4;
+	using SuspendPointSemaphore = std::counting_semaphore<SuspendPointDepthMax>;
+	std::shared_ptr<SuspendPointSemaphore> m_suspend_point_ready;
 
 	std::unique_ptr<CommandProcessor>                                m_gfx_cp;
 	std::array<std::unique_ptr<CommandProcessor>, ComputeQueueCount> m_compute_cp;

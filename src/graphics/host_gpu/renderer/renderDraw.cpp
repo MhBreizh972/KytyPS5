@@ -1035,6 +1035,7 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 		               {}, command);
 		destination.Transit(vk::ImageLayout::eTransferDstOptimal,
 		                    vk::AccessFlagBits2::eTransferWrite, {}, command);
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::ImageCopies);
 		command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal,
 		                  destination.backing.image, vk::ImageLayout::eTransferDstOptimal,
 		                  1, &region);

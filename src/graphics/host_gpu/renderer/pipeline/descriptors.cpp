@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 
+#include "common/debugCounters.h"
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common.h"
@@ -952,6 +953,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			buffer.EndRendering();
 			const auto barrier       = MakeGdsDependency(descriptors.gds.buffer);
 			const auto shader_stages = ShaderPipelineStages(NativeShaderStage(program.stage));
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 			vk_buffer.pipelineBarrier(
 			    vk::PipelineStageFlagBits::eHost | vk::PipelineStageFlagBits::eTransfer |
 			        vk::PipelineStageFlagBits::eAllGraphics |
