@@ -89,6 +89,11 @@ Lecture du diagnostic :
 - **draws/frame différents entre deux runs** : la scène n'était pas la même et la
   comparaison n'est pas valide.
 
+Pour la chute après 30 s d'immobilité : enregistre 120 s immobile depuis
+l'arrivée dans la zone, puis `--from <arrivée> --to <arrivée+120> --trend`. Les
+compteurs marqués `<==` évoluent de plus de 25 % entre le début et la fin ; un
+coût qui monte pendant que les FPS baissent est le premier suspect.
+
 Un gain n'est retenu que s'il dépasse l'écart entre les 3 répétitions d'une même
 configuration.
 

@@ -5,6 +5,7 @@ Usage:
   analyze_perf_csv.py run.csv --last 60      (the 60 s before the last 3 s of the log)
   analyze_perf_csv.py run.csv [--from 30 --to 90]
   analyze_perf_csv.py baseline.csv candidate.csv [--from 30 --to 90]
+  analyze_perf_csv.py run.csv --from 0 --to 120 --trend   (what grows while FPS falls)
   analyze_perf_csv.py --presentmon capture.csv [other.csv ...]
 
 Rates in the CSV are per second; this script reports them per flip, which is per guest frame.
@@ -144,6 +145,29 @@ def print_one(s):
         print("  " + line)
 
 
+TREND_KEYS = ["fps", "gpu_exec_ms", "gpu_thread_busy_ms", "gpu_wait_ms", "cp_blocked_ms",
+              "draws", "queue_submits", "gpu_faults", "texture_invalidations",
+              "texture_creations", "image_copies", "compile_ms"]
+
+
+def trend(path, rows):
+    """Splits the window in thirds: a cost that grows while FPS falls is a candidate cause of a
+    slowdown over time (for example after standing still for 30 s)."""
+    if len(rows) < 9:
+        return
+    third = len(rows) // 3
+    first = summarize(path, rows[:third])
+    last = summarize(path, rows[-third:])
+    print(f"== trend in {path}: first {third} s vs last {third} s of the window")
+    for key in TREND_KEYS:
+        x, y = first[key], last[key]
+        if x == 0 and y == 0:
+            continue
+        delta = (y - x) / x * 100 if x else float("inf")
+        flag = "  <==" if abs(delta) > 25 else ""
+        print(f"  {key:22s} {x:9.2f} -> {y:9.2f}  ({delta:+.0f}%){flag}")
+
+
 def compare(a, b):
     print("== candidate vs baseline (per frame)")
     rows = [("FPS", "fps"), ("frame ms", "frame_ms"), ("GPU exec ms", "gpu_exec_ms"),
@@ -189,14 +213,20 @@ def main():
     parser.add_argument("--to", dest="end", type=float, default=1e12)
     parser.add_argument("--last", type=float, default=None,
                         help="summarize the N seconds before the last 3 s of each log")
+    parser.add_argument("--trend", action="store_true",
+                        help="compare the first and last third of each window")
     parser.add_argument("--presentmon", action="store_true")
     args = parser.parse_args()
     if args.presentmon:
         presentmon(args.csv)
         return
-    summaries = [summarize(p, load(p, args.start, args.end, args.last)) for p in args.csv]
+    loaded = [(p, load(p, args.start, args.end, args.last)) for p in args.csv]
+    summaries = [summarize(p, rows) for p, rows in loaded]
     for s in summaries:
         print_one(s)
+    if args.trend:
+        for p, rows in loaded:
+            trend(p, rows)
     if len(summaries) == 2:
         compare(*summaries)
 
