@@ -48,9 +48,13 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	wait_info.pSemaphores    = &m_semaphore;
 	wait_info.pValues        = &tick;
 
-	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
-	                                         Common::DebugCounters::Counter::GpuWaitNs);
-	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	vk::Result result;
+	{
+		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
+		                                         Common::DebugCounters::Counter::GpuWaitNs);
+		Common::DebugCounters::ScopedTimer reason(Common::DebugCounters::CurrentWaitReason());
+		result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();
 }

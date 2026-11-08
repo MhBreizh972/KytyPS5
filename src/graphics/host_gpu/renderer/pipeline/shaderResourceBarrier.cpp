@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 
+#include "common/debugCounters.h"
 #include "common/assert.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/shader/shader.h"
@@ -96,6 +97,7 @@ void ShaderAccessBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags sou
 	const vk::MemoryBarrier barrier {
 	    .srcAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
 	    .dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite};
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	vk_buffer.pipelineBarrier(source_stages, vk::PipelineStageFlagBits::eAllCommands,
 	                          vk::DependencyFlags {}, 1, &barrier, 0, nullptr, 0, nullptr);
 }
@@ -105,12 +107,14 @@ void ShaderWriteHazardBarrier(vk::CommandBuffer      vk_buffer,
 	const vk::MemoryBarrier barrier {
 	    .srcAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
 	    .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite};
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, destination_stages,
 	                          vk::DependencyFlags {}, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
 void ShaderWriteBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags source_stages) {
 	const auto barrier = MakeShaderWriteDependency();
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	vk_buffer.pipelineBarrier(source_stages,
 	                          vk::PipelineStageFlagBits::eComputeShader |
 	                              vk::PipelineStageFlagBits::eAllGraphics |

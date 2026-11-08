@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
+#include "common/debugCounters.h"
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "gpu_tiler_shaders/gpu_tiler_demote_d16_spv.h"
@@ -281,6 +282,7 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset, uint64_t sou
 	barriers[2].buffer        = m_stream_buffer.Handle();
 	barriers[2].offset        = tiling.params_offset;
 	barriers[2].size          = tiling.params_size;
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	command.pipelineBarrier(
 	    vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
 	    vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer, {}, 0,
@@ -290,6 +292,7 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset, uint64_t sou
 		barriers[1].srcAccessMask = vk::AccessFlagBits::eTransferWrite;
 		barriers[1].dstAccessMask =
 		    vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 		command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 		                        vk::PipelineStageFlagBits::eComputeShader, {}, 0, nullptr, 1,
 		                        &barriers[1], 0, nullptr);
@@ -320,6 +323,7 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset, uint64_t sou
 
 	barriers[1].srcAccessMask = vk::AccessFlagBits::eShaderWrite;
 	barriers[1].dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eMemoryRead;
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
 	                        vk::PipelineStageFlagBits::eAllCommands, {}, 0, nullptr, 1,
 	                        &barriers[1], 0, nullptr);
@@ -469,6 +473,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 	                            vk::AccessFlagBits::eTransferWrite |
 	                            vk::AccessFlagBits::eShaderWrite;
 	barriers[1].dstAccessMask = vk::AccessFlagBits::eShaderWrite;
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	command.pipelineBarrier(
 	    vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
 	    vk::PipelineStageFlagBits::eComputeShader, {}, 0, nullptr, 2, barriers, 0, nullptr);
@@ -534,6 +539,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 	}
 	barriers[1].srcAccessMask = vk::AccessFlagBits::eShaderWrite;
 	barriers[1].dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eMemoryRead;
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
 	                        vk::PipelineStageFlagBits::eAllCommands, {}, 0, nullptr, 1,
 	                        &barriers[1], 0, nullptr);
@@ -584,6 +590,7 @@ void TileManager::TransformColor(Result input, Result output, ColorTransform tra
 	barriers[1].dstAccessMask = vk::AccessFlagBits::eShaderWrite;
 	m_scheduler.EndRendering();
 	auto command = m_scheduler.Current().Handle();
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	command.pipelineBarrier(
 	    vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
 	    vk::PipelineStageFlagBits::eComputeShader, {}, 0, nullptr, 2, barriers, 0, nullptr);
@@ -601,6 +608,7 @@ void TileManager::TransformColor(Result input, Result output, ColorTransform tra
 	command.dispatch((pixels + 63u) / 64u, 1, 1);
 	barriers[1].srcAccessMask = vk::AccessFlagBits::eShaderWrite;
 	barriers[1].dstAccessMask = vk::AccessFlagBits::eTransferRead;
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
 	                        vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &barriers[1],
 	                        0, nullptr);
@@ -651,6 +659,7 @@ vk::Buffer TileManager::CheckColorClear(Result metadata, uint64_t stride, uint32
 	    .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite};
 	m_scheduler.EndRendering();
 	auto command = m_scheduler.Current().Handle();
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                        vk::PipelineStageFlagBits::eComputeShader, {}, 1, &barrier, 0, nullptr,
 	                        0, nullptr);
@@ -665,6 +674,7 @@ vk::Buffer TileManager::CheckColorClear(Result metadata, uint64_t stride, uint32
 	command.dispatch(slices, 1, 1);
 	barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
 	barrier.dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
 	                        vk::PipelineStageFlagBits::eAllCommands, {}, 1, &barrier, 0, nullptr,
 	                        0, nullptr);

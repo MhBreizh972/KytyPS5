@@ -77,8 +77,10 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 		dependency.dependencyFlags          = vk::DependencyFlagBits::eByRegion;
 		dependency.bufferMemoryBarrierCount = 1;
 		dependency.pBufferMemoryBarriers    = &before;
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 		command.pipelineBarrier2(dependency);
 		const vk::BufferCopy copy {offset, destination_offset, chunk};
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferCopies);
 		command.copyBuffer(m_staging_buffer.Handle(), buffer.Handle(), 1, &copy);
 		auto after          = before;
 		after.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
@@ -86,6 +88,7 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 		after.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
 		after.dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
 		dependency.pBufferMemoryBarriers = &after;
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 		command.pipelineBarrier2(dependency);
 		bytes += chunk;
 		address += chunk;
@@ -189,9 +192,11 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	before.buffer              = buffer.Handle();
 	before.offset              = 0;
 	before.size                = buffer.Size();
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before, 0,
 	                       nullptr);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferCopies);
 	native.copyBuffer(buffer.Handle(), download.buffer->Handle(),
 	                  static_cast<uint32_t>(copies.size()), copies.data());
 
@@ -201,6 +206,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	after.buffer        = download.buffer->Handle();
 	after.offset        = download.offset;
 	after.size          = total_size;
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 	                       vk::PipelineStageFlagBits::eAllCommands |
 	                           vk::PipelineStageFlagBits::eHost,
@@ -218,6 +224,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
 		const auto tick = m_scheduler.CurrentTick();
+		KYTY_WAIT_REASON(WaitReadbackNs);
 		m_scheduler.Wait(tick);
 		m_scheduler.WaitPriorityOperations(tick);
 		publish();
@@ -437,14 +444,17 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		before.buffer              = buffer.Handle();
 		before.offset              = 0;
 		before.size                = buffer.Size();
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 		native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 		                       vk::PipelineStageFlagBits::eTransfer,
 		                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &before, 0, nullptr);
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferCopies);
 		native.copyBuffer(source, buffer.Handle(), static_cast<uint32_t>(copies.size()),
 		                  copies.data());
 		auto after          = before;
 		after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
 		after.dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 		native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 		                       vk::PipelineStageFlagBits::eAllCommands,
 		                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
@@ -689,6 +699,7 @@ void BufferCache::RunGarbageCollector() {
 
 	// Publish all queued downloads before releasing their tracked pages and owners.
 	const auto completion_tick = m_scheduler.CurrentTick();
+	KYTY_WAIT_REASON(WaitReadbackNs);
 	m_scheduler.Wait(completion_tick);
 	m_scheduler.WaitPriorityOperations(completion_tick);
 	for (const auto id: dirty_buffers) {

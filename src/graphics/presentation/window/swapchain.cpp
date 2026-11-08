@@ -49,7 +49,10 @@ public:
 	FramePool(WindowContext& window, CommandScheduler& scheduler)
 	    : m_window(window), m_scheduler(scheduler) {}
 	~FramePool() {
-		m_scheduler.Wait(m_scheduler.CurrentTick() - 1);
+		{
+			KYTY_WAIT_REASON(WaitPresentNs);
+			m_scheduler.Wait(m_scheduler.CurrentTick() - 1);
+		}
 		for (auto& frame: m_frames) {
 			m_window.graphic_ctx.device.destroyImageView(frame->view, nullptr);
 			if (frame->image.image != nullptr) {
@@ -102,7 +105,10 @@ public:
 		frame->busy = true;
 		m_mutex.Unlock();
 
-		m_scheduler.Wait(frame->present_tick);
+		{
+			KYTY_WAIT_REASON(WaitPresentNs);
+			m_scheduler.Wait(frame->present_tick);
+		}
 		return frame;
 	}
 
@@ -572,7 +578,10 @@ bool Swapchain::NeedsResize() const {
 Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
 	// Repeated frames can wrap the semaphore ring without acquiring a new source frame.
 	// Wait for the submission that consumed this slot before signaling it again.
-	scheduler.Wait(m_image_acquired_ticks[m_frame_index]);
+	{
+		KYTY_WAIT_REASON(WaitPresentNs);
+		scheduler.Wait(m_image_acquired_ticks[m_frame_index]);
+	}
 	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
 	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
 	    &m_image_index);

@@ -422,7 +422,12 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					{
+						Common::DebugCounters::ScopedTimer blocked(
+						    Common::DebugCounters::Counter::CpBlockedSleeps,
+						    Common::DebugCounters::Counter::CpBlockedSleepNs);
+						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					}
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;
@@ -1020,6 +1025,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 				            "may be lower.\n");
 			});
 
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::OcclusionSyntheticDumps);
 			// Without host occlusion queries, publish an always-visible result. The PS5 layout
 			// contains one interleaved begin/end pair per DB, and bit 63 marks a result ready.
 			constexpr uint64_t ready_bit    = 1ull << 63u;

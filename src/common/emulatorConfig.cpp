@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/perfLog.h"
 
 #include <algorithm>
 #include <memory>
@@ -17,6 +18,7 @@ void Initialize() {
 }
 
 void Shutdown() {
+	Common::PerfLog::Stop();
 	Common::DebugCounters::SetEnabled(false);
 	g_config.reset();
 }
@@ -30,6 +32,7 @@ void Load(const ConfigOptions& cfg) {
 
 	*g_config = cfg;
 	Common::DebugCounters::SetEnabled(cfg.perf_overlay_enabled);
+	Common::PerfLog::Start();
 }
 
 uint32_t GetScreenWidth() {

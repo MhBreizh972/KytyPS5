@@ -203,6 +203,7 @@ TextureCache::BindingType TextureCache::UploadBinding(const Image& image) {
 
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
 	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureCreations);
 	RegisterImage(id);
 	return id;
 }
@@ -1826,6 +1827,7 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 	barrier.offset              = download.offset;
 	barrier.size                = range.size;
 	m_scheduler.EndRendering();
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	m_scheduler.Current().Handle().pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                                               vk::PipelineStageFlagBits::eHost, {}, 0, nullptr,
 	                                               1, &barrier, 0, nullptr);
@@ -1952,6 +1954,7 @@ void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 	for (const auto id: FindImagesInRegion(page_begin, page_end - page_begin)) {
 		auto& owner = m_slot_images[id];
 		if (owner.Overlaps(address, size)) {
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureInvalidations);
 			owner.MarkCpuDirty();
 			UntrackImage(id);
 			continue;

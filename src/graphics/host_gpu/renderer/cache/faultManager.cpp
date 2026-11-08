@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 
+#include "common/debugCounters.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "gpu_tiler_shaders/fault_buffer_process_spv.h"
@@ -77,6 +78,7 @@ FaultManager::~FaultManager() {
 
 void FaultManager::ProcessFaultBuffer() {
 	if (const auto wait_tick = m_fault_areas[m_current_area]; wait_tick != 0) {
+		KYTY_WAIT_REASON(WaitFaultBufferNs);
 		m_scheduler.Wait(wait_tick);
 		m_scheduler.PopPendingOperations();
 	}
@@ -118,6 +120,7 @@ void FaultManager::ProcessFaultBuffer() {
 	dependency.dependencyFlags          = vk::DependencyFlagBits::eByRegion;
 	dependency.bufferMemoryBarrierCount = 1;
 	dependency.pBufferMemoryBarriers    = &pre_barrier;
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	command.pipelineBarrier2(dependency);
 	command.bindPipeline(vk::PipelineBindPoint::eCompute, m_fault_process_pipeline);
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,
@@ -126,6 +129,7 @@ void FaultManager::ProcessFaultBuffer() {
 	const auto num_workgroups = (num_threads + 63) / 64;
 	command.dispatch(static_cast<uint32_t>(num_workgroups), 1, 1);
 	dependency.pBufferMemoryBarriers = &post_barrier;
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::PipelineBarriers);
 	command.pipelineBarrier2(dependency);
 
 	const auto area = m_current_area;
