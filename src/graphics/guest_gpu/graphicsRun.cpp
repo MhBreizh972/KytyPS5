@@ -80,10 +80,22 @@ uint32_t IdleFlushDraws() {
 	return draws;
 }
 
+// KYTY_SUSPEND_POINT_DEPTH: guest frames (sceAgcSuspendPoint calls) that may run ahead of the
+// host GPU's completion of the earlier ones. 1 is the previous behavior; default 2.
+std::ptrdiff_t SuspendPointDepth(std::ptrdiff_t max) {
+	const char* text = std::getenv("KYTY_SUSPEND_POINT_DEPTH");
+	if (text == nullptr || *text == '\0') {
+		return 2;
+	}
+	return std::clamp<std::ptrdiff_t>(std::strtol(text, nullptr, 10), 1, max);
+}
+
 } // namespace
 
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	m_suspend_point_ready =
+	    std::make_shared<SuspendPointSemaphore>(SuspendPointDepth(SuspendPointDepthMax));
 	m_gfx_cp = std::make_unique<CommandProcessor>(renderer, 0);
 	m_thread = std::jthread(ThreadRun, this);
 	if (CpWakeupEnabled()) {
@@ -210,7 +222,8 @@ void GuestGpu::SubmitFlipPreparation(uint64_t request_id) {
 void GuestGpu::SuspendPoint() {
 	EXIT_IF(IsGpuThread() || CommandScheduler::InDeferredOperation());
 	// Do not hold a queue lock while waiting: asynchronous work may be needed to
-	// finish the preceding graphics frame. The first point returns immediately.
+	// finish the preceding graphics frame. The first points, up to the depth, return
+	// immediately; the guest still orders its own GPU work through labels and fences.
 	m_suspend_point_ready->acquire();
 	Submission submission;
 	submission.type = SubmissionType::SuspendPoint;

@@ -60,13 +60,17 @@ Matrice minimale (scène lente, puis rapide) :
 |---|---|---|
 | officielle 7816ac7 | — (`-NoCounters`) | référence FPS sans instrumentation |
 | perf/instrumentation | — | coût de l'instrumentation + diagnostic |
-| perf/idle-gpu-flush | `KYTY_CP_WAKEUP=0`, `KYTY_IDLE_FLUSH_DRAWS=0` | doit égaler instrumentation |
-| perf/idle-gpu-flush | `KYTY_IDLE_FLUSH_DRAWS=0` | effet du réveil des queues seul |
-| perf/idle-gpu-flush | `KYTY_CP_WAKEUP=0` | effet de la soumission anticipée seule |
-| perf/idle-gpu-flush | — | les deux |
+| perf/suspend-depth | `KYTY_CP_WAKEUP=0`, `KYTY_IDLE_FLUSH_DRAWS=0`, `KYTY_SUSPEND_POINT_DEPTH=1` | doit égaler instrumentation |
+| perf/suspend-depth | `KYTY_IDLE_FLUSH_DRAWS=0`, `KYTY_SUSPEND_POINT_DEPTH=1` | effet du réveil des queues seul |
+| perf/suspend-depth | `KYTY_CP_WAKEUP=0`, `KYTY_SUSPEND_POINT_DEPTH=1` | effet de la soumission anticipée seule |
+| perf/suspend-depth | `KYTY_CP_WAKEUP=0`, `KYTY_IDLE_FLUSH_DRAWS=0` | effet de la 2e image en vol seule |
+| perf/suspend-depth | `KYTY_SUSPEND_POINT_DEPTH=1` | réveil + soumission anticipée |
+| perf/suspend-depth | — | les trois optimisations |
 
-`perf/idle-gpu-flush` contient les trois branches empilées, et chaque
-optimisation se coupe par variable : on compare donc le même binaire.
+`perf/suspend-depth` contient toutes les branches empilées, et chaque
+optimisation se coupe par variable : on compare donc le même binaire. Avec
+`KYTY_CP_WAKEUP=0 KYTY_IDLE_FLUSH_DRAWS=0 KYTY_SUSPEND_POINT_DEPTH=1`, il doit
+se comporter comme perf/instrumentation.
 
 ## 5. Analyse
 
@@ -106,3 +110,4 @@ configuration.
 | `KYTY_CP_WAKEUP` | 1 | 0 = comportement d'origine pour les queues suspendues |
 | `KYTY_CP_BLOCKED_SPIN_US` | 50 | fenêtre de réessai avant sommeil (0–1000) |
 | `KYTY_IDLE_FLUSH_DRAWS` | 8 | travaux avant soumission anticipée ; 0 = désactivé |
+| `KYTY_SUSPEND_POINT_DEPTH` | 2 | images du jeu en avance sur le GPU hôte (1 = d'origine, max 4) |
