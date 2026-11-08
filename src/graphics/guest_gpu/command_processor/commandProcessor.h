@@ -89,6 +89,9 @@ public:
 	void ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector, void* address, uint64_t data,
 	                uint32_t interrupt_context_id, bool gl2_writeback);
 	void WriteBackImages();
+	// After recorded GPU work: submits early when the host GPU has finished everything submitted,
+	// so it does not sit idle while the CP keeps recording into the open command buffer.
+	void MaybeFlushIdleGpu();
 	void Flip(int handle, int index, int flip_mode, int64_t flip_arg);
 	void PrepareCpuFlip(uint64_t request_id);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z,
@@ -142,6 +145,9 @@ private:
 
 	const int m_interrupt_event_id;
 	uint64_t  m_synthetic_occlusion_counter = 0;
+	uint64_t  m_idle_flush_tick             = 0;
+	uint32_t  m_idle_flush_work             = 0;
+	uint32_t  m_idle_flush_checks           = 0;
 	bool      m_predicate_skip              = false;
 };
 

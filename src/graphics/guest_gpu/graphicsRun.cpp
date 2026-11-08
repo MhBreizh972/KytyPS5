@@ -66,6 +66,20 @@ uint32_t CpBlockedSpinMicros() {
 	return micros;
 }
 
+// KYTY_IDLE_FLUSH_DRAWS: draws and dispatches recorded into the open command buffer before an
+// idle host GPU gets them early (default 8, four times as many inside a rendering instance,
+// 0 disables).
+uint32_t IdleFlushDraws() {
+	static const uint32_t draws = [] {
+		const char* text = std::getenv("KYTY_IDLE_FLUSH_DRAWS");
+		if (text == nullptr || *text == '\0') {
+			return 8u;
+		}
+		return static_cast<uint32_t>(std::min(std::strtoul(text, nullptr, 10), 1ul << 20u));
+	}();
+	return draws;
+}
+
 } // namespace
 
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
@@ -787,12 +801,48 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 	}
 }
 
+void CommandProcessor::MaybeFlushIdleGpu() {
+	const auto threshold = IdleFlushDraws();
+	if (threshold == 0) {
+		return;
+	}
+	auto&      scheduler = GetScheduler();
+	const auto tick      = scheduler.CurrentTick();
+	// Any other submission starts a new command buffer and the count over.
+	if (tick != m_idle_flush_tick) {
+		m_idle_flush_tick   = tick;
+		m_idle_flush_work   = 0;
+		m_idle_flush_checks = 0;
+	}
+	const auto needed = scheduler.Current().IsRendering() ? threshold * 4 : threshold;
+	if (++m_idle_flush_work < needed) {
+		return;
+	}
+	// The open buffer has tick; the GPU is idle once it has signaled every earlier one. Reading
+	// the driver's counter is cheap but not free, so it is refreshed on every fourth check.
+	auto& master = scheduler.GetMasterSemaphore();
+	if (!master.IsFree(tick - 1)) {
+		if ((++m_idle_flush_checks & 3u) != 0) {
+			return;
+		}
+		master.Refresh();
+		if (!master.IsFree(tick - 1)) {
+			return;
+		}
+	}
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::IdleFlushes);
+	// A plain submission boundary, as at the end of a slice; the occlusion publication that
+	// BufferFlush adds for a polling guest is not needed in the middle of a command list.
+	scheduler.Flush();
+}
+
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
 		args.instance_count = NumInstances();
 	}
 	m_renderer.GetRenderExecutor().DrawIndex(CurrentBuffer(), args);
+	MaybeFlushIdleGpu();
 }
 
 const void* CommandProcessor::IndexAddress(uint32_t first_index) const {
@@ -873,6 +923,10 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		return;
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::IndirectDraws, draw_count);
+	struct FlushAfter {
+		CommandProcessor& cp;
+		~FlushAfter() { cp.MaybeFlushIdleGpu(); }
+	} flush_after {*this};
 
 	auto&      executor  = m_renderer.GetRenderExecutor();
 	const auto args_addr = m_draw_indirect_args_base_addr + data_offset;
@@ -927,6 +981,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	m_renderer.GetRenderExecutor().DispatchDirect(CurrentBuffer(), thread_group_x, thread_group_y,
 	                                              thread_group_z, mode, IsAsyncComputeQueue());
+	MaybeFlushIdleGpu();
 }
 
 void CommandProcessor::ProcessPssr(const Pssr::Request& request) {
@@ -944,6 +999,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,
 	                                                IsAsyncComputeQueue());
+	MaybeFlushIdleGpu();
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
@@ -951,6 +1007,7 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 		args.instance_count = NumInstances();
 	}
 	m_renderer.GetRenderExecutor().DrawAuto(CurrentBuffer(), args);
+	MaybeFlushIdleGpu();
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {

@@ -71,6 +71,7 @@ const char* Name(Counter counter) noexcept {
 	    "wait_other_ns",
 	    "cp_blocked_sleeps",
 	    "cp_blocked_sleep_ns",
+	    "idle_flushes",
 	};
 	static_assert(std::size(NAMES) == static_cast<size_t>(Counter::Count),
 	              "every debug counter needs a CSV column name");

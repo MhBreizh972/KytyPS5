@@ -77,6 +77,7 @@ enum class Counter {
 	// pending results), until new work or the retry timeout.
 	CpBlockedSleeps,
 	CpBlockedSleepNs,
+	IdleFlushes, // Early submissions to an idle host GPU (KYTY_IDLE_FLUSH_DRAWS).
 	Count
 };
 
